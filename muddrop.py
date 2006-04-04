@@ -553,13 +553,14 @@ class Configuration:
         plgNamespace.loadtimers(xmlRoot.find("timers"))
 
         # Load plugins.
-        for xmlPlugin in xmlRoot.find("plugins"):
-            plgPlugin = Plugin()
-            strID = plgPlugin.load(xmlPlugin.attrib["name"])
-            if strID in self.dicPlugins:
-                mdBot.fnError("Duplicate plugin '%s' found." % xmlPlugin.attrib["name"])
-            else:
-                self.dicPlugins[strID] = plgPlugin
+        if xmlRoot.find("plugins"):
+            for xmlPlugin in xmlRoot.find("plugins"):
+                plgPlugin = Plugin()
+                strID = plgPlugin.load(xmlPlugin.attrib["name"])
+                if strID in self.dicPlugins:
+                    mdBot.fnError("Duplicate plugin '%s' found." % xmlPlugin.attrib["name"])
+                else:
+                    self.dicPlugins[strID] = plgPlugin
         flFile.close()
 
 class MUDConnection(asynchat.async_chat):
