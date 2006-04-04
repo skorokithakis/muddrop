@@ -1,0 +1,115 @@
+<mudbot
+host = "realms.game.org"
+port = "4000"
+localport = "2000"
+name = "Sample"
+password = "c2FtcGxl"
+connectioncommands = "jdsof\naojs"
+debug = "y"
+notetoconsole = "n"
+notetoremote = "y"
+notetolog = "n"
+>
+    <logging
+     keep_ansi = "n"
+     enabled = "n"
+     toscreen = "y"
+     logfile = "%a %d %b %Y %H%M%S.log"
+     prependin = "[%H:%M:%S] "
+     prependout = "[%H:%M:%S] "
+     appendin = ""
+     appendout = ""
+     onconnect = "Connected to %server on %name on %a, %d %b %Y %H:%M:%S"
+     ondisconnect = "Disconnected on %a, %d %b %Y %H:%M:%S."
+     onremoteconnect = "Remote client %rip connected on %a, %d %b %Y %H:%M:%S"
+     onremotedisconnect = "Remote client %rip disconnected on %a, %d %b %Y %H:%M:%S."
+    />
+    <triggers>
+        <trigger
+         enabled="y"
+         keep_ansi="y"
+         match="^\x1b\[0;1;(?:36mMaster says|37mMaster tells you) \'drop\, (.*?)\'$"
+         ignore_case="y"
+         keep_evaluating="y"
+         sequence="100"
+        >
+            <send>%1</send>
+        </trigger>
+  <trigger
+   back_colour="8"
+   bold="y"
+   enabled="y"
+   expand_variables="y"
+   group="grLa"
+   ignore_case="y"
+   inverse="y"
+   italic="y"
+   keep_evaluating="y"
+   match="ifdgij"
+   match_back_colour="y"
+   match_bold="y"
+   match_inverse="y"
+   match_italic="y"
+   match_text_colour="y"
+   name="lblLa"
+   omit_from_log="y"
+   omit_from_output="y"
+   regexp="y"
+   repeat="y"
+   script="fnLa"
+   sequence="100"
+   text_colour="8"
+  >
+  </trigger>
+  <trigger
+   bold="y"
+   enabled="y"
+   ignore_case="y"
+   keep_evaluating="y"
+   match="^Master (?:exclaims to|asks|says to) you, \'omg (.*?)\'$"
+   match_bold="y"
+   match_text_colour="y"
+   regexp="y"
+   sequence="100"
+   text_colour="14"
+  >
+  <send>%1</send>
+  </trigger>
+  <trigger
+   bold="y"
+   enabled="y"
+   keep_evaluating="y"
+   match="The mystical tint to your vision fades."
+   match_bold="y"
+   match_text_colour="y"
+   sequence="100"
+   text_colour="11"
+  >
+  <send>c mystical
+trans</send>
+  </trigger>
+  <trigger
+   bold="y"
+   enabled="y"
+   keep_evaluating="y"
+   match="You have ((\d+)\,|)((\d+)\,|)(\d+) gold pieces\.$"
+   match_bold="y"
+   match_text_colour="y"
+   regexp="y"
+   sequence="100"
+   text_colour="11"
+  >
+  <send>drop %2%4%5 coins
+</send>
+  </trigger>
+    </triggers>
+<timers>
+  <timer enabled="y" minute="5" >
+  <send>save</send>
+
+  </timer>
+</timers>
+    <!--plugins>
+        <plugin name="Fight.xml" />
+    </plugins-->
+</mudbot>
