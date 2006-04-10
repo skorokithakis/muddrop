@@ -37,6 +37,11 @@ class Formatting:
         strText = time.strftime(strText)
         return strText
 
+    def fnRegexpify(self, strText):
+        """Convert a standard MUSHClient trigger to a regular expression."""
+        strText = re.sub(r"([\[\]\-\=\_\+\"\'\;\:\/\?\\\.\>\,\<\!\@\#\$\%\^\&\*\(\)\|])", r"\\\1", strText)
+        return "^%s$" % strText
+
 class MUDdrop:
     def init(self):
         """Initialise stuff."""
@@ -365,17 +370,24 @@ class Plugin:
             trgTrigger.strName = self.__getattr__(xmlTrigger, "name")
             trgTrigger.strGroup = self.__getattr__(xmlTrigger, "group")
             trgTrigger.blnIgnoreCase = self.__getattr__(xmlTrigger, "ignore_case", True)
+            trgTrigger.blnRegexp = self.__getattr__(xmlTrigger, "regexp", True)
             trgTrigger.blnKeepEvaluating = self.__getattr__(xmlTrigger, "keep_evaluating", True)
             trgTrigger.strMatch = self.__getattr__(xmlTrigger, "match")
             trgTrigger.intSequence = int(self.__getattr__(xmlTrigger, "sequence"))
             trgTrigger.intSendTo = int(self.__getattr__(xmlTrigger, "send_to"))
             trgTrigger.strScript = self.__getattr__(xmlTrigger, "script")
+
+            if not trgTrigger.blnRegexp:
+                trgTrigger.strMatch = fmFormatting.fnRegexpify(trgTrigger.strMatch)
+
             if len(xmlTrigger) > 0:
+                # Substitute MUSHClient compatible %1 for pyregexp \1.
                 trgTrigger.strSend = re.sub(r"\%(?:(\d)|\<(.*?)\>)", r"\\g<\1>", xmlTrigger[0].text)
             else:
                 trgTrigger.strSend = ""
             intFlags = 0
-            if trgTrigger.blnIgnoreCase: intFlags |= re.IGNORECASE
+            if trgTrigger.blnIgnoreCase:
+                intFlags |= re.IGNORECASE
             trgTrigger.reTrigger = re.compile(trgTrigger.strMatch, intFlags)
             self.lstTriggers.append(trgTrigger)
         self.lstTriggers.sort()
@@ -475,7 +487,7 @@ class Plugin:
             "port": 4000,                 # Port to connect on.
             "prependin": "",              # Text to prepend to incoming data.
             "prependout": "",             # Text to prepend to outgoing data.
-            "regexp": True,               # Is the trigger a regular expression? (NS)
+            "regexp": False,              # Is the trigger a regular expression?
             "repeat": False,              # Repeat the trigger on the same line. (NS)
             "save_state": False,          # Save the namespace's state. (NS)
             "script": "",                 # Call a script function when executed.
