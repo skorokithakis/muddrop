@@ -89,7 +89,7 @@ class MUDdrop:
         """Initialise stuff."""
         self.strBuffer = ""
         self.cnnConnection = None
-        self.lstLastStyle = None
+        self.lstLastStyle = [37, 40]
         # We need the init() function (instead of __init__) for the call
         # below to work, otherwise mdBot will not exist yet and we won't
         # be able to call it.
@@ -525,8 +525,8 @@ class Plugin:
             "appendout": "",              # Text to append to outgoing data.
             "active_closed": False,       # Is timer active when the world is closed? (NS)
             "at_time": False,             # At time for timer. (NS)
-            "back_colour": 0,          # Backcolour to match on. (NS)
-            "bold": False,                 # Match if the text is bold. (NS)
+            "back_colour": 0,             # Backcolour to match on. (NS)
+            "bold": False,                # Match if the text is bold. (NS)
             "connectioncommands": "",     # Commands to send on connection.
             "debug": False,               # Print debugging data in the output.
             "enabled": False,             # Is the item enabled?
@@ -534,18 +534,18 @@ class Plugin:
             "group": "",                  # Item group name.
             "hour": 0,                    # Hour interval for timers. (NS)
             "ignore_case": False,         # Ignore case. (NS)
-            "inverse": False,              # Match if the text is inverse. (NS)
-            "italic": False,               # Match if the text is italic. (NS)
+            "inverse": False,             # Match if the text is inverse. (NS)
+            "italic": False,              # Match if the text is italic. (NS)
             "keep_ansi": False,           # Keep the ANSI codes to match on.
             "keep_evaluating": True,      # Keep evaluating after a trigger has been matched.
             "localport": 4000,            # Port number to listen to.
             "logfile": "log.txt",         # Log filename.
             "logging": False,             # Is logging enabled?
-            "match_back_colour": False,   # Enable match on backcolour. (NS)
-            "match_bold": False,          # Enable match on bold. (NS)
-            "match_inverse": False,       # Enable match on inverse. (NS)
-            "match_italic": False,        # Enable match on italic. (NS)
-            "match_text_colour": False,   # Enable match on forecolour. (NS)
+            "match_back_colour": False,   # Enable match on backcolour.
+            "match_bold": False,          # Enable match on bold.
+            "match_inverse": False,       # Enable match on inverse.
+            "match_italic": False,        # Enable match on italic.
+            "match_text_colour": False,   # Enable match on forecolour.
             "minute": 0,                  # Minute interval for timers. (NS)
             "name": "",                   # Item name.
             "notetoconsole": False,       # Send notes to the console.
@@ -572,7 +572,7 @@ class Plugin:
             "send_to": 0,                 # Send to various outputs. (PS)
             "sequence": 100,              # Sequence of the trigger.
             "toscreen": False,            # Print the output to stdout.
-            "text_colour": 0,          # Forecolour to match on. (NS)
+            "text_colour": 0,             # Forecolour to match on. (NS)
             "variable": "",               # Variable to send to (NS)
         }
         if strAttribute in xmlNode.attrib:
