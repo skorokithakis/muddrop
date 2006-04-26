@@ -10,6 +10,22 @@ import socket
 
 class Formatting:
     """Various text formatting functions."""
+    def __init__(self):
+        self.strANSICodes = r"(?:\x1b\[(?:(?:\d+(?:|;))*[fHpm]|\=\d*[hl]|\d*[ABCDJKknsu])|\xff(\xfb|\xfc)\x01)"
+
+    def fnGetLineBeginning(self, strLine, intStart):
+        """Find the actual beginning of a match object in the line that includes
+           the ANSI codes."""
+
+        itrRe = re.finditer(self.strANSICodes, strLine)
+
+        for reMatch in itrRe:
+            tplMatch = reMatch.span()
+            if tplMatch[0] <= intStart:
+                intStart += tplMatch[1] - tplMatch[0]
+
+        return intStart
+
     def fnTrimNewline(self, strText):
         """Trim the final newlines from a string."""
         if strText.endswith("\r\n") or strText.endswith("\n\r"):
@@ -21,11 +37,37 @@ class Formatting:
 
     def fnStripANSI(self, strText):
         """Strip various ANSI codes from the input."""
-        strReplaced = strText
-        strReplaced = re.sub(r"\x1b\[(\d+(|;))*m", "", strReplaced)
-        strReplaced = re.sub(r"\x1b\[(2J|k|s|u)", "", strReplaced)
-        strReplaced = re.sub(r"\xff(\xfb|\xfc)\x01", "", strReplaced)
-        return strReplaced
+        return re.sub(self.strANSICodes, "", strText)
+
+    def fnGetStyle(self, strLine, intStart):
+        """Return the ANSI codes for the matching line."""
+        # NOTE: It does not appear that the MUD sends a 0 every time it
+        # wants to reset the style. Rather, it assumes that styles are
+        # reset whenever it sends a new escape sequence (for example,
+        # \x1b[m sets the text to white on black), so we will just use
+        # the last style sent.
+        reANSI = re.compile(r"\x1b\[(?:(\d+)(?:|;))?(?:(\d+)(?:|;))?(?:(\d+)(?:|;))?(?:(\d+)(?:|;))?(?:(\d+)(?:|;))?m")
+        # Return all the styles of the line.
+        lstTempStyles = reANSI.findall(strLine[0:intStart])
+        if lstTempStyles == []:
+            return None
+
+        lstTempStyles = lstTempStyles[-1]
+        lstStyles = [int(strNumber) for strNumber in lstTempStyles if strNumber != ""]
+        # If there are no foreground/background styles, insert the
+        # "white on black" default.
+        blnForeground = False
+        blnBackground = False
+        for intStyle in lstStyles:
+            if 30 <= intStyle <= 37:
+                blnForeground = True
+            if 40 <= intStyle <= 47:
+                blnBackground = True
+        if not blnForeground:
+            lstStyles.append(37)
+        if not blnBackground:
+            lstStyles.append(40)
+        return lstStyles
 
     def fnExpandMacros(self, strText, strIP = "?"):
         """Expand various macros such as the time, server, etc."""
@@ -47,6 +89,7 @@ class MUDdrop:
         """Initialise stuff."""
         self.strBuffer = ""
         self.cnnConnection = None
+        self.lstLastStyle = None
         # We need the init() function (instead of __init__) for the call
         # below to work, otherwise mdBot will not exist yet and we won't
         # be able to call it.
@@ -79,6 +122,9 @@ class MUDdrop:
         tmrThreadTimer.start()
 
     def fnMatchTriggers(self, strData):
+        lstLastStyle = fmFormatting.fnGetStyle(strData, len(strData))
+        if lstLastStyle != None:
+            self.lstLastStyle = lstLastStyle
         for plgPlugin in self.cnfConfiguration.dicPlugins.values():
             for ciTrigger in plgPlugin.lstTriggers:
                 if ciTrigger.blnEnabled == False:
@@ -91,6 +137,28 @@ class MUDdrop:
                     reResult = ciTrigger.reTrigger.search(fmFormatting.fnStripANSI(strData))
 
                 if reResult != None:
+                    if not ciTrigger.blnKeepANSI:
+                        intStart = fmFormatting.fnGetLineBeginning(strData, reResult.start(0))
+                        lstLineStyle = fmFormatting.fnGetStyle(strData, intStart)
+                        if lstLineStyle == None:
+                            lstLineStyle = self.lstLastStyle
+
+                        if ciTrigger.blnMatchBold:
+                            if ciTrigger.blnBold != (1 in lstLineStyle):
+                                continue
+                        if ciTrigger.blnMatchItalic:
+                            if ciTrigger.blnItalic != (3 in lstLineStyle):
+                                continue
+                        if ciTrigger.blnMatchInverse:
+                            if ciTrigger.blnInverse != (7 in lstLineStyle):
+                                continue
+                        if ciTrigger.blnMatchBackColour:
+                            if ciTrigger.intBackColour + 32 not in lstLineStyle:
+                                continue
+                        if ciTrigger.blnMatchTextColour:
+                            if ciTrigger.intTextColour + 22 not in lstLineStyle:
+                                continue
+
                     if self.cnfConfiguration.blnDebug:
                         self.fnNoteData("Matched '%s' in %s, groups are %s" % (ciTrigger.strMatch, plgPlugin.strName, reResult.groups()))
                     # Check "send to".
@@ -298,7 +366,6 @@ class Callbacks:
         """Send text to the MUD after the specified amount of seconds."""
         self.plgPlugin.createtimer(int(intSeconds), strText)
 
-
 class Plugin:
     class Trigger:
         """The trigger object class."""
@@ -367,6 +434,14 @@ class Plugin:
             trgTrigger = Plugin.Trigger()
             trgTrigger.blnEnabled = self.__getattr__(xmlTrigger, "enabled", True)
             trgTrigger.blnKeepANSI = self.__getattr__(xmlTrigger, "keep_ansi", True)
+            trgTrigger.blnBold = self.__getattr__(xmlTrigger, "bold", True)
+            trgTrigger.blnInverse = self.__getattr__(xmlTrigger, "inverse", True)
+            trgTrigger.blnItalic = self.__getattr__(xmlTrigger, "italic", True)
+            trgTrigger.blnMatchBackColour = self.__getattr__(xmlTrigger, "match_back_colour", True)
+            trgTrigger.blnMatchBold = self.__getattr__(xmlTrigger, "match_bold", True)
+            trgTrigger.blnMatchInverse = self.__getattr__(xmlTrigger, "match_inverse", True)
+            trgTrigger.blnMatchItalic = self.__getattr__(xmlTrigger, "match_italic", True)
+            trgTrigger.blnMatchTextColour = self.__getattr__(xmlTrigger, "match_text_colour", True)
             trgTrigger.strName = self.__getattr__(xmlTrigger, "name")
             trgTrigger.strGroup = self.__getattr__(xmlTrigger, "group")
             trgTrigger.blnIgnoreCase = self.__getattr__(xmlTrigger, "ignore_case", True)
@@ -374,6 +449,8 @@ class Plugin:
             trgTrigger.blnKeepEvaluating = self.__getattr__(xmlTrigger, "keep_evaluating", True)
             trgTrigger.strMatch = self.__getattr__(xmlTrigger, "match")
             trgTrigger.intSequence = int(self.__getattr__(xmlTrigger, "sequence"))
+            trgTrigger.intBackColour = int(self.__getattr__(xmlTrigger, "back_colour"))
+            trgTrigger.intTextColour = int(self.__getattr__(xmlTrigger, "text_colour"))
             trgTrigger.intSendTo = int(self.__getattr__(xmlTrigger, "send_to"))
             trgTrigger.strScript = self.__getattr__(xmlTrigger, "script")
 
@@ -448,8 +525,8 @@ class Plugin:
             "appendout": "",              # Text to append to outgoing data.
             "active_closed": False,       # Is timer active when the world is closed? (NS)
             "at_time": False,             # At time for timer. (NS)
-            "back_colour": None,          # Backcolour to match on. (NS)
-            "bold": None,                 # Match if the text is bold. (NS)
+            "back_colour": 0,          # Backcolour to match on. (NS)
+            "bold": False,                 # Match if the text is bold. (NS)
             "connectioncommands": "",     # Commands to send on connection.
             "debug": False,               # Print debugging data in the output.
             "enabled": False,             # Is the item enabled?
@@ -457,8 +534,8 @@ class Plugin:
             "group": "",                  # Item group name.
             "hour": 0,                    # Hour interval for timers. (NS)
             "ignore_case": False,         # Ignore case. (NS)
-            "inverse": None,              # Match if the text is inverse. (NS)
-            "italic": None,               # Match if the text is italic. (NS)
+            "inverse": False,              # Match if the text is inverse. (NS)
+            "italic": False,               # Match if the text is italic. (NS)
             "keep_ansi": False,           # Keep the ANSI codes to match on.
             "keep_evaluating": True,      # Keep evaluating after a trigger has been matched.
             "localport": 4000,            # Port number to listen to.
@@ -495,7 +572,7 @@ class Plugin:
             "send_to": 0,                 # Send to various outputs. (PS)
             "sequence": 100,              # Sequence of the trigger.
             "toscreen": False,            # Print the output to stdout.
-            "text_colour": None,          # Forecolour to match on. (NS)
+            "text_colour": 0,          # Forecolour to match on. (NS)
             "variable": "",               # Variable to send to (NS)
         }
         if strAttribute in xmlNode.attrib:
