@@ -1,12 +1,16 @@
 import elementtree.ElementTree as ET
-import threading
+import exceptions
 import re
-import sys
+import sys, os
 import base64
 import time
-import asyncore
-import asynchat
-import socket
+from twisted.internet.protocol import Protocol, ClientCreator, ServerFactory
+from twisted.protocols.basic import LineReceiver
+from twisted.internet import reactor
+
+AC_DISCONNECTED = 0
+AC_CONNECTING = 1
+AC_CONNECTED = 2
 
 class Formatting:
     """Various text formatting functions."""
@@ -69,12 +73,12 @@ class Formatting:
             lstStyles.append(40)
         return lstStyles
 
-    def fnExpandMacros(self, strText, strIP = "?"):
+    def fnExpandMacros(self, strText, insMUDdrop, strIP = "?"):
         """Expand various macros such as the time, server, etc."""
-        strText = strText.replace("%server", mdBot.cnfConfiguration.strHost)
-        strText = strText.replace("%name", mdBot.cnfConfiguration.strName)
-        strText = strText.replace("%rport", str(mdBot.cnfConfiguration.intPort))
-        strText = strText.replace("%lport", str(mdBot.cnfConfiguration.intLocalPort))
+        strText = strText.replace("%server", insMUDdrop.cnfConfiguration.strHost)
+        strText = strText.replace("%name", insMUDdrop.cnfConfiguration.strName)
+        strText = strText.replace("%rport", str(insMUDdrop.cnfConfiguration.intPort))
+        strText = strText.replace("%lport", str(insMUDdrop.cnfConfiguration.intLocalPort))
         strText = strText.replace("%rip", strIP)
         strText = time.strftime(strText)
         return strText
@@ -85,61 +89,84 @@ class Formatting:
         return "^%s$" % strText
 
 class MUDdrop:
-    def init(self):
+    def init(self, strFilename):
         """Initialise stuff."""
         self.strBuffer = ""
-        self.cnnConnection = None
+        self.fmFormatting = Formatting()
+        self.stConnectionState = AC_DISCONNECTED
+        # Remote user connection.
+        self.cntClientConnection = None
         self.lstLastStyle = [37, 40]
         # We need the init() function (instead of __init__) for the call
         # below to work, otherwise mdBot will not exist yet and we won't
         # be able to call it.
-        self.cnfConfiguration = Configuration(r"character.xml")
-        self.cntConnection = None
+        self.cnfConfiguration = Configuration(strFilename)
+        # Execute the plugins' OnPluginInstall callback.
         self.fnHandleTimers()
+        self.cntConnection = MUDConnection(self.cnfConfiguration.strHost, self.cnfConfiguration.intPort)
+        mdBot.fnCallPluginFunction("OnPluginInstall", ())
+
+    def fnExecCode(self, strCode, plgPlugin):
+        """Execute some code."""
+        try:
+            exec(strCode, {"world": Callbacks(plgPlugin)})
+        except:
+            self.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
+
+    def fnCallPluginFunction(self, strFunctionCall, tplArguments):
+        """Call the specified function in all plugins."""
+        for plgPlugin in self.cnfConfiguration.dicPlugins.values():
+            plgPlugin.run(strFunctionCall, tplArguments, True)
 
     def fnExit(self):
         """Handle exiting."""
-        global tmrThreadTimer
-        if tmrThreadTimer:
-            tmrThreadTimer.cancel()
-            tmrThreadTimer = None
-        mdBot = None
-        sys.exit()
+        if mdBot.cntConnection != None:
+            mdBot.cntConnection.close()
+        reactor.stop()
+        self = None
 
     def fnHandleTimers(self):
-        global tmrThreadTimer
-        tmrThreadTimer = threading.Timer(1.0, self.fnHandleTimers)
+        # The timer that just fired is useless, so create a new one.
         for plgPlugin in self.cnfConfiguration.dicPlugins.values():
             for tmrTimer in plgPlugin.lstTimers:
+                if not tmrTimer.blnEnabled:
+                    continue
                 fltNewTime = time.time()
                 if fltNewTime > tmrTimer.fltTime + tmrTimer.intHour * 3600 + tmrTimer.intMinute * 60 + tmrTimer.intSecond:
-                    self.fnSendData(tmrTimer.strSend)
+                    if tmrTimer.intSendTo == 0:
+                        if mdBot.cntConnection != None:
+                            self.fnSendData(tmrTimer.strSend)
+                    elif tmrTimer.intSendTo == 12:
+                        self.fnExecCode(tmrTimer.strSend, plgPlugin)
                     if tmrTimer.blnOneShot:
                         plgPlugin.lstTimers.remove(tmrTimer)
                     else:
                         tmrTimer.fltTime = fltNewTime
-
-        tmrThreadTimer.start()
+                    # Check scripting.
+                    if tmrTimer.strScript != "":
+                        # We need a tuple, hence the comma
+                        plgPlugin.run(tmrTimer.strScript, (tmrTimer.strName, ))
+        reactor.callLater(1, self.fnHandleTimers)
 
     def fnMatchTriggers(self, strData):
-        lstLastStyle = fmFormatting.fnGetStyle(strData, len(strData))
+        lstLastStyle = self.fmFormatting.fnGetStyle(strData, len(strData))
         if lstLastStyle != None:
             self.lstLastStyle = lstLastStyle
         for plgPlugin in self.cnfConfiguration.dicPlugins.values():
             for ciTrigger in plgPlugin.lstTriggers:
-                if ciTrigger.blnEnabled == False:
+                if not ciTrigger.blnEnabled:
                     continue
 
                 # Strip ANSI if necessary
                 if ciTrigger.blnKeepANSI:
                     reResult = ciTrigger.reTrigger.search(strData)
                 else:
-                    reResult = ciTrigger.reTrigger.search(fmFormatting.fnStripANSI(strData))
+                    reResult = ciTrigger.reTrigger.search(self.fmFormatting.fnStripANSI(strData))
 
                 if reResult != None:
                     if not ciTrigger.blnKeepANSI:
-                        intStart = fmFormatting.fnGetLineBeginning(strData, reResult.start(0))
-                        lstLineStyle = fmFormatting.fnGetStyle(strData, intStart)
+                        intStart = self.fmFormatting.fnGetLineBeginning(strData, reResult.start(0))
+                        lstLineStyle = self.fmFormatting.fnGetStyle(strData, intStart)
                         if lstLineStyle == None:
                             lstLineStyle = self.lstLastStyle
 
@@ -165,10 +192,7 @@ class MUDdrop:
                     if ciTrigger.intSendTo == 0:
                         self.fnSendData(reResult.expand(ciTrigger.strSend))
                     elif ciTrigger.intSendTo == 12:
-                        try:
-                            exec(reResult.expand(ciTrigger.strSend), {"world": Callbacks(plgPlugin)})
-                        except:
-                            mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
+                        self.fnExecCode(reResult.expand(ciTrigger.strSend), plgPlugin)
 
                     # Check scripting.
                     if ciTrigger.strScript != "":
@@ -186,41 +210,41 @@ class MUDdrop:
         """Send data to the MUD."""
         if strLine != "":
             try:
-                self.cntConnection.push(strLine + "\n")
+                self.cntConnection.sendLine(strLine)
             except:
-                mdBot.fnError("Could not write data to socket. Reason is '%s'." % sys.exc_value)
+                self.fnError("Could not write data to socket. Reason is '%s'." % sys.exc_value)
             self.fnLogDataOut(strLine)
 
     def fnLogDataIn(self, strData):
         """Log the incoming data."""
         if self.cnfConfiguration.blnToScreen:
-            print fmFormatting.fnStripANSI(strData)
+            print self.fmFormatting.fnStripANSI(strData)
         if self.cnfConfiguration.blnLogging:
             if not self.cnfConfiguration.blnKeepANSI:
-                self.cnfConfiguration.flLogFile.write("%s%s%s\n" % (fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut), fmFormatting.fnStripANSI(strData), fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendIn)))
+                self.cnfConfiguration.flLogFile.write("%s%s%s\n" % (self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut, self), self.fmFormatting.fnStripANSI(strData), self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendIn, self)))
             else:
-                self.cnfConfiguration.flLogFile.write("%s%s%s\n" % (fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut), strData, fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendIn)))
+                self.cnfConfiguration.flLogFile.write("%s%s%s\n" % (self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut, self), strData, self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendIn, self)))
 
     def fnNoteData(self, strLine, blnOmitConsole = False, blnOmitRemote = False, blnOmitLog = False, blnOmitNewline = False):
         """Print debugging data."""
-        strData = fmFormatting.fnTrimNewline(strLine)
+        strData = self.fmFormatting.fnTrimNewline(strLine)
         if self.cnfConfiguration.blnNoteToConsole and not blnOmitConsole:
             if blnOmitNewline:
                 print strData,
             else:
                 print strData
         if self.cnfConfiguration.blnLogging and not blnOmitLog and self.cnfConfiguration.blnNoteToLog:
-            self.cnfConfiguration.flLogFile.write("%s%s%s%s" % (fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut), strData, fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendOut), (blnOmitNewline and [""] or ["\n"])[0]))
-        if self.cnnConnection and not blnOmitRemote and self.cnfConfiguration.blnNoteToRemote:
-            self.cnnConnection.fnSend(strData + (blnOmitNewline and [""] or ["\n"])[0])
+            self.cnfConfiguration.flLogFile.write("%s%s%s%s" % (self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut, self), strData, self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendOut, self), (blnOmitNewline and [""] or ["\n"])[0]))
+        if self.cntClientConnection and blnOmitRemote and self.cnfConfiguration.blnNoteToRemote:
+            self.cntClientConnection.fnSend(strData + (blnOmitNewline and [""] or ["\n"])[0])
 
     def fnLogDataOut(self, strData):
         """Log the outgoing data."""
-        strData = fmFormatting.fnTrimNewline(strData)
+        strData = self.fmFormatting.fnTrimNewline(strData)
         if self.cnfConfiguration.blnToScreen:
             print strData
         if self.cnfConfiguration.blnLogging:
-            self.cnfConfiguration.flLogFile.write("%s%s%s\n" % (fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut), strData, fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendOut)))
+            self.cnfConfiguration.flLogFile.write("%s%s%s\n" % (self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut, self), strData, self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendOut, self)))
 
     def fnGetStyle(self, strLine, intCharNumber):
         """Retrieve the style of a character in a line."""
@@ -249,47 +273,75 @@ class MUDdrop:
 
     def OnConnect(self):
         """Initialise various connection details."""
+        # Open the logfile if specified.
         if self.cnfConfiguration.blnLogging:
-            self.cnfConfiguration.flLogFile = file(fmFormatting.fnExpandMacros(self.cnfConfiguration.strLogFile), "a")
+            self.cnfConfiguration.flLogFile = file(self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strLogFile, self), "a")
+        # Print OnConnect string.
         if self.cnfConfiguration.strOnConnect != "":
-            self.fnNoteData(fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnConnect) + "\n")
+            self.fnNoteData(self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnConnect, self) + "\n")
+        # Perform autologon.
         self.fnSendData(self.cnfConfiguration.strName)
-        self.cntConnection.push(self.cnfConfiguration.strPassword + "\n")
+        self.cntConnection.sendLine(self.cnfConfiguration.strPassword + "\n")
+        # Send connection commands.
         if self.cnfConfiguration.strConnectionCommands != "":
             self.fnSendData(self.cnfConfiguration.strConnectionCommands)
+        # Execute OnPluginConnect.
+        self.fnCallPluginFunction("OnPluginConnect", ())
+
+    def OnConnectFailed(self):
+        """Do stuff when the connection has failed."""
+        # Print OnConnectFailed string.
+        if self.cnfConfiguration.strOnConnectFailed != "":
+            self.fnNoteData(self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnConnectFailed, self) + "\n")
+        self.fnCallPluginFunction("OnPluginConnectFailed", ())
 
     def OnDisconnect(self):
         """Clean up after disconnection."""
         if self.cnfConfiguration.strOnDisconnect != "":
-            self.fnNoteData(fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnDisconnect) + "\n")
+            self.fnNoteData(self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnDisconnect, self) + "\n")
         if self.cnfConfiguration.blnLogging:
             self.cnfConfiguration.flLogFile.close()
+        self.fnCallPluginFunction("OnPluginDisconnect", ())
 
     def OnRemoteConnect(self, strAddress):
         """Remote client connection callback."""
         if self.cnfConfiguration.strOnRemoteConnect != "":
-            self.fnNoteData(fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnRemoteConnect, strAddress), blnOmitRemote = True)
+            self.fnNoteData(self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnRemoteConnect, self, strAddress), blnOmitRemote = True)
+        self.fnCallPluginFunction("OnPluginClientConnect", ())
 
     def OnRemoteDisconnect(self, strAddress):
         """Remote client disconnection callback."""
         if self.cnfConfiguration.strOnRemoteDisconnect != "":
-            self.fnNoteData(fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnRemoteDisconnect, strAddress), blnOmitRemote = True)
+            self.fnNoteData(self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnRemoteDisconnect, self, strAddress), blnOmitRemote = True)
+        self.fnCallPluginFunction("OnPluginClientDisconnect", ())
 
     def fnError(self, strDescription):
         print "ERROR: %s" % strDescription
-        mdBot.fnExit()
-        sys.exit()
+        self.fnExit()
 
     def fnException(self, strType, strValue, tbTraceback):
+        if strType == exceptions.SystemExit:
+            os._exit(0)
         print "Exception of type %s occurred in line %s, reason \"%s\"." % (strType, tbTraceback.tb_lineno, strValue)
 
 class Callbacks:
     def __init__(self, plgNamespace):
         # Get the plugin reference so we can manipulate it.
         self.plgPlugin = plgNamespace
+    def Connect(self):
+        """Connect to the server."""
+        if mdBot.cntConnection == None:
+            mdBot.cntConnection = MUDConnection(mdBot.cnfConfiguration.strHost, mdBot.cnfConfiguration.intPort)
     def Send(self, strData):
         """Send data to the world."""
         mdBot.fnSendData(strData)
+    def Exit(self):
+        """Exits the program."""
+        mdBot.fnExit()
+    def Disconnect(self):
+        """Disconnect the current connection."""
+        if mdBot.cntConnection != None:
+            mdBot.cntConnection.close()
     def Note(self, strData):
         """Send text to stdout."""
         mdBot.fnNoteData(strData)
@@ -297,6 +349,26 @@ class Callbacks:
         """Set a variable in the plugin's variables dictionary."""
         self.plgPlugin.dicVariables[strVariableName] = strData
         return 0
+    def GetInfo(self, intInfoType):
+        """Get information about the current character."""
+        if intInfoType == 1:
+            return mdBot.cnfConfiguration.strHost
+        elif intInfoType == 3:
+            return mdBot.cnfConfiguration.strName
+        elif intInfoType == 11:
+            return mdBot.cnfConfiguration.strOnConnect
+        elif intInfoType == 12:
+            return mdBot.cnfConfiguration.strOnDisconnect
+        elif intInfoType == 106:
+            # Return true if not connected.
+            return (mdBot.stConnectionState == AC_DISCONNECTED) and True or False
+        elif intInfoType == 106:
+            # Return true if currently connecting.
+            return (mdBot.stConnectionState == AC_CONNECTING) and True or False
+        elif intInfoType == 3:
+            return mdBot.cnfConfiguration.strName
+        else:
+            return "NOT IMPLEMENTED"
     def GetVariable(self, strVariableName):
         """Get a variable from the plugin's variables dictionary."""
         if strVariableName in self.plgPlugin.dicVariables:
@@ -330,6 +402,28 @@ class Callbacks:
                 # If the trigger is in the group, set its status
                 # and increment the counter.
                 ciTrigger.blnEnabled = blnEnabled
+                intCounter += 1
+        return intCounter
+    def EnableTimer(self, strTimerName, blnEnabled):
+        """Enable or disable a timer."""
+        for ciTimer in self.plgPlugin.lstTimers:
+            if ciTimer.strName == strTimerName:
+                # If the trigger is what the user wanted, set its status
+                ciTimer.fltTime = time.time() + ciTimer.intOffsetHour * 3600 + ciTimer.intOffsetMinute * 60 + ciTimer.intOffsetSecond
+                ciTimer.blnEnabled = blnEnabled
+                return 0
+        else:
+            # Trigger not found
+            return 30017
+    def EnableTimerGroup(self, strGroupName, blnEnabled):
+        """Enable or disable a trigger group."""
+        intCounter = 0
+        for ciTimer in self.plgPlugin.lstTimers:
+            if ciTimer.strGroup == strGroupName:
+                # If the trigger is in the group, set its status
+                # and increment the counter.
+                ciTimer.fltTime = time.time() + ciTimer.intOffsetHour * 3600 + ciTimer.intOffsetMinute * 60 + ciTimer.intOffsetSecond
+                ciTimer.blnEnabled = blnEnabled
                 intCounter += 1
         return intCounter
     def EnableGroup(self, strGroupName, blnEnabled):
@@ -400,22 +494,27 @@ class Plugin:
             return
         for xmlTimer in xmlTimers:
             tmrTimer = Plugin.Timer()
-            tmrTimer.blnEnabled = self.__getattr__(xmlTimer, "enabled", True)
-            tmrTimer.strName = self.__getattr__(xmlTimer, "name")
-            tmrTimer.strGroup = self.__getattr__(xmlTimer, "group")
-            tmrTimer.strVariable = self.__getattr__(xmlTimer, "variable")
-            tmrTimer.strScript = self.__getattr__(xmlTimer, "script")
-            tmrTimer.intHour = int(self.__getattr__(xmlTimer, "hour"))
-            tmrTimer.intMinute = int(self.__getattr__(xmlTimer, "minute"))
-            tmrTimer.intSecond = int(self.__getattr__(xmlTimer, "second"))
-            tmrTimer.intOffsetHour = int(self.__getattr__(xmlTimer, "offset_hour"))
-            tmrTimer.intOffsetMinute = int(self.__getattr__(xmlTimer, "offset_minute"))
-            tmrTimer.intOffsetSecond = int(self.__getattr__(xmlTimer, "offset_second"))
-            tmrTimer.blnOneShot = self.__getattr__(xmlTimer, "one_shot", True)
-            tmrTimer.blnOmitFromOutput = self.__getattr__(xmlTimer, "omit_from_output", True)
-            tmrTimer.blnOmitFromLog = self.__getattr__(xmlTimer, "omit_from_log", True)
-            tmrTimer.blnActiveClosed = self.__getattr__(xmlTimer, "active_closed", True)
-            tmrTimer.blnAtTime = self.__getattr__(xmlTimer, "at_time", True)
+            tmrTimer.blnEnabled = self.getxmlattr(xmlTimer, "enabled", True)
+            tmrTimer.strName = self.getxmlattr(xmlTimer, "name")
+            for tmrOther in self.lstTimers:
+                if (tmrOther.strName.lower() == tmrOther.strName.lower()) and (tmrOther.strName != ""):
+                    mdBot.fnError("Duplicate timer name found: '%s'" % tmrOther.strName)
+            tmrTimer.strGroup = self.getxmlattr(xmlTimer, "group")
+            tmrTimer.strVariable = self.getxmlattr(xmlTimer, "variable")
+            tmrTimer.strScript = self.getxmlattr(xmlTimer, "script")
+            tmrTimer.intHour = int(self.getxmlattr(xmlTimer, "hour"))
+            tmrTimer.intMinute = int(self.getxmlattr(xmlTimer, "minute"))
+            # This is converted to an int, change if accuracy is needed.
+            tmrTimer.intSecond = int(float(self.getxmlattr(xmlTimer, "second")))
+            tmrTimer.intSendTo = int(self.getxmlattr(xmlTimer, "send_to"))
+            tmrTimer.intOffsetHour = int(self.getxmlattr(xmlTimer, "offset_hour"))
+            tmrTimer.intOffsetMinute = int(self.getxmlattr(xmlTimer, "offset_minute"))
+            tmrTimer.intOffsetSecond = int(self.getxmlattr(xmlTimer, "offset_second"))
+            tmrTimer.blnOneShot = self.getxmlattr(xmlTimer, "one_shot", True)
+            tmrTimer.blnOmitFromOutput = self.getxmlattr(xmlTimer, "omit_from_output", True)
+            tmrTimer.blnOmitFromLog = self.getxmlattr(xmlTimer, "omit_from_log", True)
+            tmrTimer.blnActiveClosed = self.getxmlattr(xmlTimer, "active_closed", True)
+            tmrTimer.blnAtTime = self.getxmlattr(xmlTimer, "at_time", True)
             tmrTimer.strSend = xmlTimer.find("send").text
             tmrTimer.fltTime = time.time() + tmrTimer.intOffsetHour * 3600 + tmrTimer.intOffsetMinute * 60 + tmrTimer.intOffsetSecond
 
@@ -427,32 +526,37 @@ class Plugin:
 
     def loadtriggers(self, xmlTriggers):
         """Load triggers from the xmlTriggers node."""
+        fmFormatting = Formatting()
+
         self.lstTriggers = []
         if xmlTriggers == None:
             return
         for xmlTrigger in xmlTriggers:
             trgTrigger = Plugin.Trigger()
-            trgTrigger.blnEnabled = self.__getattr__(xmlTrigger, "enabled", True)
-            trgTrigger.blnKeepANSI = self.__getattr__(xmlTrigger, "keep_ansi", True)
-            trgTrigger.blnBold = self.__getattr__(xmlTrigger, "bold", True)
-            trgTrigger.blnInverse = self.__getattr__(xmlTrigger, "inverse", True)
-            trgTrigger.blnItalic = self.__getattr__(xmlTrigger, "italic", True)
-            trgTrigger.blnMatchBackColour = self.__getattr__(xmlTrigger, "match_back_colour", True)
-            trgTrigger.blnMatchBold = self.__getattr__(xmlTrigger, "match_bold", True)
-            trgTrigger.blnMatchInverse = self.__getattr__(xmlTrigger, "match_inverse", True)
-            trgTrigger.blnMatchItalic = self.__getattr__(xmlTrigger, "match_italic", True)
-            trgTrigger.blnMatchTextColour = self.__getattr__(xmlTrigger, "match_text_colour", True)
-            trgTrigger.strName = self.__getattr__(xmlTrigger, "name")
-            trgTrigger.strGroup = self.__getattr__(xmlTrigger, "group")
-            trgTrigger.blnIgnoreCase = self.__getattr__(xmlTrigger, "ignore_case", True)
-            trgTrigger.blnRegexp = self.__getattr__(xmlTrigger, "regexp", True)
-            trgTrigger.blnKeepEvaluating = self.__getattr__(xmlTrigger, "keep_evaluating", True)
-            trgTrigger.strMatch = self.__getattr__(xmlTrigger, "match")
-            trgTrigger.intSequence = int(self.__getattr__(xmlTrigger, "sequence"))
-            trgTrigger.intBackColour = int(self.__getattr__(xmlTrigger, "back_colour"))
-            trgTrigger.intTextColour = int(self.__getattr__(xmlTrigger, "text_colour"))
-            trgTrigger.intSendTo = int(self.__getattr__(xmlTrigger, "send_to"))
-            trgTrigger.strScript = self.__getattr__(xmlTrigger, "script")
+            trgTrigger.strMatch = self.getxmlattr(xmlTrigger, "match")
+            trgTrigger.blnEnabled = self.getxmlattr(xmlTrigger, "enabled", True)
+            trgTrigger.blnKeepANSI = self.getxmlattr(xmlTrigger, "keep_ansi", True)
+            trgTrigger.blnBold = self.getxmlattr(xmlTrigger, "bold", True)
+            trgTrigger.blnInverse = self.getxmlattr(xmlTrigger, "inverse", True)
+            trgTrigger.blnItalic = self.getxmlattr(xmlTrigger, "italic", True)
+            trgTrigger.blnMatchBackColour = self.getxmlattr(xmlTrigger, "match_back_colour", True)
+            trgTrigger.blnMatchBold = self.getxmlattr(xmlTrigger, "match_bold", True)
+            trgTrigger.blnMatchInverse = self.getxmlattr(xmlTrigger, "match_inverse", True)
+            trgTrigger.blnMatchItalic = self.getxmlattr(xmlTrigger, "match_italic", True)
+            trgTrigger.blnMatchTextColour = self.getxmlattr(xmlTrigger, "match_text_colour", True)
+            trgTrigger.strName = self.getxmlattr(xmlTrigger, "name")
+            for trgOther in self.lstTriggers:
+                if (trgOther.strName.lower() == trgTrigger.strName.lower()) and (trgOther.strName != ""):
+                    mdBot.fnError("Duplicate trigger name found: '%s'" % trgOther.strName)
+            trgTrigger.strGroup = self.getxmlattr(xmlTrigger, "group")
+            trgTrigger.blnIgnoreCase = self.getxmlattr(xmlTrigger, "ignore_case", True)
+            trgTrigger.blnRegexp = self.getxmlattr(xmlTrigger, "regexp", True)
+            trgTrigger.blnKeepEvaluating = self.getxmlattr(xmlTrigger, "keep_evaluating", True)
+            trgTrigger.intSequence = int(self.getxmlattr(xmlTrigger, "sequence"))
+            trgTrigger.intBackColour = int(self.getxmlattr(xmlTrigger, "back_colour"))
+            trgTrigger.intTextColour = int(self.getxmlattr(xmlTrigger, "text_colour"))
+            trgTrigger.intSendTo = int(self.getxmlattr(xmlTrigger, "send_to"))
+            trgTrigger.strScript = self.getxmlattr(xmlTrigger, "script")
 
             if not trgTrigger.blnRegexp:
                 trgTrigger.strMatch = fmFormatting.fnRegexpify(trgTrigger.strMatch)
@@ -469,12 +573,15 @@ class Plugin:
             self.lstTriggers.append(trgTrigger)
         self.lstTriggers.sort()
 
-    def run(self, strFunctionName, tplArguments):
+    def run(self, strFunctionName, tplArguments, blnSilent = False):
         """Execute the function in the plugin namespace."""
         try:
             self.dicGlobals[strFunctionName](*tplArguments)
+        except KeyError:
+            if not blnSilent:
+                mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
         except:
-            mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
+                mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
 
     def load(self, strFilename):
         """Load the plugin data, triggers, etc."""
@@ -488,10 +595,10 @@ class Plugin:
 
         # Load generic plugin configuration.
         xmlPlugin = xmlTree.find("plugin")
-        self.strName = self.__getattr__(xmlPlugin, "name")
-        self.strID = self.__getattr__(xmlPlugin, "id")
-        self.blnSaveState = self.__getattr__(xmlPlugin, "save_state", True)
-        if self.__getattr__(xmlPlugin, "language").lower() != "python":
+        self.strName = self.getxmlattr(xmlPlugin, "name")
+        self.strID = self.getxmlattr(xmlPlugin, "id")
+        self.blnSaveState = self.getxmlattr(xmlPlugin, "save_state", True)
+        if self.getxmlattr(xmlPlugin, "language").lower() != "python":
             mdBot.fnError("The only plugin language supported is Python, error in '%s'." % strFilename)
         strScript = xmlTree.find("script").text
         # Execute the script and keep the globals
@@ -509,14 +616,14 @@ class Plugin:
 
         return self.strID
 
-    def __selyn__(self, strText):
+    def fnselyn(self, strText):
         """Convert 'y'/'n' to True or False."""
         if strText.lower() == "y":
             return True
         else:
             return False
 
-    def __getattr__(self, xmlNode, strAttribute, blnYN = False):
+    def getxmlattr(self, xmlNode, strAttribute, blnYN = False):
         """Get the value of strAttribute from xmlNode, converting it to
            binary if blnYN is True."""
 
@@ -577,7 +684,7 @@ class Plugin:
         }
         if strAttribute in xmlNode.attrib:
             if blnYN:
-                return self.__selyn__(xmlNode.attrib[strAttribute])
+                return self.fnselyn(xmlNode.attrib[strAttribute])
             else:
                 return xmlNode.attrib[strAttribute]
         else:
@@ -588,7 +695,7 @@ class Plugin:
 
 
 class Configuration:
-    def __init__(self, strFilename="character.xml"):
+    def __init__(self, strFilename):
         """Load the configuration from the specified file."""
         try:
             flFile = file(strFilename)
@@ -597,45 +704,51 @@ class Configuration:
             sys.exit()
         xmlTree = ET.parse(flFile)
         xmlRoot = xmlTree.getroot()
-        # Create this here so we can access the __getattr__ function.
+        # Create this here so we can access the getxmlattr function.
         self.dicPlugins = {"000000000000000000000000": Plugin()}
         plgNamespace = self.dicPlugins["000000000000000000000000"]
 
         # Connection details.
-        self.strHost = plgNamespace.__getattr__(xmlRoot, "host")
-        self.intPort = int(plgNamespace.__getattr__(xmlRoot, "port"))
-        self.intLocalPort = int(plgNamespace.__getattr__(xmlRoot, "localport"))
-        self.strName = plgNamespace.__getattr__(xmlRoot, "name")
-        self.strPassword = base64.decodestring(plgNamespace.__getattr__(xmlRoot, "password"))
-        self.strConnectionCommands = plgNamespace.__getattr__(xmlRoot, "connectioncommands").decode("string_escape")
+        self.strHost = plgNamespace.getxmlattr(xmlRoot, "host")
+        self.intPort = int(plgNamespace.getxmlattr(xmlRoot, "port"))
+        self.intLocalPort = int(plgNamespace.getxmlattr(xmlRoot, "localport"))
+        self.strName = plgNamespace.getxmlattr(xmlRoot, "name")
+        self.strPassword = base64.decodestring(plgNamespace.getxmlattr(xmlRoot, "password"))
+        self.strConnectionCommands = plgNamespace.getxmlattr(xmlRoot, "connectioncommands").decode("string_escape")
 
         # Debugging.
-        self.blnDebug = plgNamespace.__getattr__(xmlRoot, "debug", True)
-        self.blnNoteToConsole = plgNamespace.__getattr__(xmlRoot, "notetoconsole", True)
-        self.blnNoteToLog = plgNamespace.__getattr__(xmlRoot, "notetolog", True)
-        self.blnNoteToRemote = plgNamespace.__getattr__(xmlRoot, "notetoremote", True)
+        self.blnDebug = plgNamespace.getxmlattr(xmlRoot, "debug", True)
+        self.blnNoteToConsole = plgNamespace.getxmlattr(xmlRoot, "notetoconsole", True)
+        self.blnNoteToLog = plgNamespace.getxmlattr(xmlRoot, "notetolog", True)
+        self.blnNoteToRemote = plgNamespace.getxmlattr(xmlRoot, "notetoremote", True)
 
         # Logging.
         xmlLogging = xmlRoot.find("logging")
-        self.blnLogging = plgNamespace.__getattr__(xmlLogging, "enabled", True)
-        self.blnToScreen = plgNamespace.__getattr__(xmlLogging, "toscreen", True)
-        self.blnKeepANSI = plgNamespace.__getattr__(xmlLogging, "keep_ansi", True)
-        self.strLogFile = plgNamespace.__getattr__(xmlLogging, "logfile")
-        self.strAppendIn = plgNamespace.__getattr__(xmlLogging, "appendin").decode("string_escape")
-        self.strAppendOut = plgNamespace.__getattr__(xmlLogging, "appendout").decode("string_escape")
-        self.strPrependIn = plgNamespace.__getattr__(xmlLogging, "prependin").decode("string_escape")
-        self.strPrependOut = plgNamespace.__getattr__(xmlLogging, "prependout").decode("string_escape")
-        self.strOnConnect = plgNamespace.__getattr__(xmlLogging, "onconnect").decode("string_escape")
-        self.strOnDisconnect = plgNamespace.__getattr__(xmlLogging, "ondisconnect").decode("string_escape")
-        self.strOnRemoteConnect = plgNamespace.__getattr__(xmlLogging, "onremoteconnect").decode("string_escape")
-        self.strOnRemoteDisconnect = plgNamespace.__getattr__(xmlLogging, "onremotedisconnect").decode("string_escape")
+        self.blnLogging = plgNamespace.getxmlattr(xmlLogging, "enabled", True)
+        self.blnToScreen = plgNamespace.getxmlattr(xmlLogging, "toscreen", True)
+        self.blnKeepANSI = plgNamespace.getxmlattr(xmlLogging, "keep_ansi", True)
+        self.strLogFile = plgNamespace.getxmlattr(xmlLogging, "logfile")
+        self.strAppendIn = plgNamespace.getxmlattr(xmlLogging, "appendin").decode("string_escape")
+        self.strAppendOut = plgNamespace.getxmlattr(xmlLogging, "appendout").decode("string_escape")
+        self.strPrependIn = plgNamespace.getxmlattr(xmlLogging, "prependin").decode("string_escape")
+        self.strPrependOut = plgNamespace.getxmlattr(xmlLogging, "prependout").decode("string_escape")
+        self.strOnConnect = plgNamespace.getxmlattr(xmlLogging, "onconnect").decode("string_escape")
+        self.strOnConnectFailed = plgNamespace.getxmlattr(xmlLogging, "onconnectfailed").decode("string_escape")
+        self.strOnDisconnect = plgNamespace.getxmlattr(xmlLogging, "ondisconnect").decode("string_escape")
+        self.strOnRemoteConnect = plgNamespace.getxmlattr(xmlLogging, "onremoteconnect").decode("string_escape")
+        self.strOnRemoteDisconnect = plgNamespace.getxmlattr(xmlLogging, "onremotedisconnect").decode("string_escape")
 
         # Pass the standard namespace to the plugin so we can access it.
         plgNamespace.strID = "000000000000000000000000"
         plgNamespace.strName = "Main namespace"
         plgNamespace.blnSaveState = True
+        strScript = xmlTree.find("script").text
+        plgNamespace.dicGlobals = {"world": Callbacks(plgNamespace)}
+        try:
+            exec(strScript, plgNamespace.dicGlobals)
+        except:
+            mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
         plgNamespace.dicVariables = {}
-        plgNamespace.strScript = ""
 
         # Load triggers, timers.
         plgNamespace.loadtriggers(xmlRoot.find("triggers"))
@@ -652,91 +765,118 @@ class Configuration:
                     self.dicPlugins[strID] = plgPlugin
         flFile.close()
 
-class MUDConnection(asynchat.async_chat):
-    def __init__(self, strHost, intPort):
-        asynchat.async_chat.__init__(self)
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.set_terminator("\n")
-        self.strBuffer = ""
-        try:
-            self.connect((strHost, intPort))
-        except:
-            self.close()
-            mdBot.fnError("Could not connect to host, reason is '%s'." % sys.exc_value[1])
-    def handle_connect(self):
-        mdBot.OnConnect()
-    def handle_close(self):
-        mdBot.OnDisconnect()
-        if mdBot.cnnConnection != None:
-            mdBot.cnnConnection.close()
-        self.close()
-        mdBot.fnExit()
-    def collect_incoming_data(self, data):
-        strData = data
-        if mdBot.cnnConnection != None:
-            mdBot.cnnConnection.fnSend(strData)
-        self.strBuffer = self.strBuffer + strData
-    def found_terminator(self):
-        if mdBot.cnnConnection != None:
-            mdBot.cnnConnection.fnSend("\n")
-        mdBot.fnProcessData(self.strBuffer.replace("\r", ""))
-        self.strBuffer = ""
-
-class ClientDispatcher(asynchat.async_chat):
-    def __init__(self, (cnnConnection, strAddress)):
-        asynchat.async_chat.__init__(self, cnnConnection)
-        self.set_terminator("\n")
-        self.strBuffer = ""
-        self.strAddress = strAddress[0]
-        self.intState = 0 # Name auth
-        self.push("You have connected to MUDdrop. Please enter the character name: \n")
-    def handle_close(self):
-        global server
-        mdBot.OnRemoteDisconnect(self.strAddress)
-        server = Server()
-        mdBot.cnnConnection = None
-        self.close()
-    def collect_incoming_data(self, data):
-        strData = data
-        self.strBuffer = self.strBuffer + strData
-    def found_terminator(self):
-        if self.intState == 0:
-            self.strAuthName = self.strBuffer.strip().lower()
-            self.intState = 1
-            self.push("Please enter the character password: \n")
-        elif self.intState == 1:
-            if self.strAuthName == mdBot.cnfConfiguration.strName.lower() and self.strBuffer.strip() == mdBot.cnfConfiguration.strPassword:
-                self.intState = 2
-                self.push("Welcome to %s.\n" % mdBot.cnfConfiguration.strName)
-                mdBot.OnRemoteConnect(self.strAddress)
-            else:
-                self.push("Wrong name/password.\n")
-                self.handle_close()
-        elif self.intState == 2:
-            mdBot.cntConnection.send(self.strBuffer)
-            mdBot.fnLogDataOut(self.strBuffer)
-        self.strBuffer = ""
-    def fnSend(self, strData):
-        """Sends the data if the user has authenticated."""
-        if self.intState == 2: # Authenticated.
-            self.push(strData)
-
-class Server(asyncore.dispatcher):
+class MUDProtocol(LineReceiver):
     def __init__(self):
-        asyncore.dispatcher.__init__(self)
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.set_reuse_addr()
-        self.bind(('', mdBot.cnfConfiguration.intLocalPort))
-        self.listen(1)
+        self.setRawMode()
+        self.delimiter = "\n"
+        self.buffer = ""
+    def rawDataReceived(self, data):
+        if mdBot.cntClientConnection:
+            mdBot.cntClientConnection.fnSend(data)
+        self.buffer += data.replace("\r", "")
+        while True:
+            try:
+                line, self.buffer = self.buffer.split(self.delimiter, 1)
+            except ValueError:
+                break
+            else:
+                mdBot.fnProcessData(line.replace("\r", ""))
+    def connectionLost(self, reason):
+        mdBot.stConnectionState = AC_DISCONNECTED
+        mdBot.cntConnection.cleanup()
+        mdBot.OnDisconnect()
 
-    def handle_accept(self):
-        mdBot.cnnConnection = ClientDispatcher(self.accept())
-        self.close()
+class MUDConnection:
+    def __init__(self, host, port):
+        self.protocol = None
+        creator = ClientCreator(reactor, MUDProtocol)
+        deferred = creator.connectTCP(host, port)
+        deferred.addCallback(self.builtProtocol)
+        deferred.addErrback(self.connectionFailed)
+    def connectionFailed(self, reason):
+        mdBot.stConnectionState = AC_DISCONNECTED
+        self.cleanup()
+        mdBot.OnConnectFailed()
+    def builtProtocol(self, protocol):
+        self.protocol = protocol
+        mdBot.stConnectionState = AC_CONNECTED
+        mdBot.cntClientConnection = MUDServer()
+        mdBot.OnConnect()
+    def startedConnecting(self, connector):
+        print "Started to connect."
+        mdBot.stConnectionState = AC_CONNECTING
+    def sendLine(self, line):
+        self.protocol.sendLine(line)
+    def close(self):
+        self.protocol.transport.loseConnection()
+    def cleanup(self):
+        mdBot.stConnectionState = AC_DISCONNECTED
+        mdBot.cntConnection = None
+        if mdBot.cntClientConnection:
+            mdBot.cntClientConnection.close()
+            mdBot.cntClientConnection = None
 
-tmrThreadTimer = None
-fmFormatting = Formatting()
+class MUDServerProtocol(LineReceiver):
+    def lineReceived(self, line):
+        if self.intState == 0:
+            self.strAuthName = line
+            self.intState = 1
+            self.sendLine("Please enter the character password:")
+        elif self.intState == 1:
+            if self.strAuthName.lower() == mdBot.cnfConfiguration.strName.lower() and line == mdBot.cnfConfiguration.strPassword:
+                self.intState = 2
+                self.sendLine("Welcome to %s.\n" % mdBot.cnfConfiguration.strName)
+                mdBot.OnRemoteConnect(self.transport.getPeer().host)
+            else:
+                self.sendLine("Wrong name/password.\n")
+                self.transport.loseConnection()
+        elif self.intState == 2:
+            mdBot.cntConnection.sendLine(line)
+            mdBot.fnLogDataOut(line)
+    def connectionLost(self, reason):
+        if self.intState == 2:
+            mdBot.OnRemoteDisconnect(self.transport.getPeer().host)
+        self.factory.connected = False
+        if mdBot.cntConnection:
+            mdBot.cntClientConnection = MUDServer()
+    def connectionMade(self):
+        self.factory.connected = True
+        self.factory.port.stopListening()
+        self.intState = 0 # Name auth
+        self.sendLine("You have connected to MUDdrop, you have 20 seconds to authenticate. Please enter\nthe character name:")
+        reactor.callLater(20, self.factory.timeout)
+
+class MUDServer(ServerFactory):
+    def __init__(self):
+        self.connected = False
+        self.client = None
+        self.port = reactor.listenTCP(mdBot.cnfConfiguration.intLocalPort, self)
+    def buildProtocol(self, addr):
+        self.client = MUDServerProtocol()
+        self.client.factory = self
+        return self.client
+    def fnSend(self, line):
+        if self.connected and self.client.intState == 2: # Authenticated.
+            self.client.transport.write(line)
+    def close(self):
+        if self.connected:
+            self.client.transport.loseConnection()
+    def timeout(self):
+        if self.client.intState != 2:
+            self.close()
+
+try:
+    flFile = file("muddrop.xml")
+except:
+    print("Cannot open configuration file 'muddrop.xml' for reading.")
+    sys.exit()
+xmlTree = ET.parse(flFile)
+flFile.close()
+xmlRoot = xmlTree.getroot()
+
 mdBot = MUDdrop()
-mdBot.init()
-mdBot.cntConnection = MUDConnection(mdBot.cnfConfiguration.strHost, mdBot.cnfConfiguration.intPort)
-server = Server()
-asyncore.loop()
+mdBot.init(xmlRoot[0].attrib["file"])
+del xmlTree, flFile
+del xmlRoot
+
+reactor.run()
