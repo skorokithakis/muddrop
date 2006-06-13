@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<!-- To customize this script, change the entity above to match on both
+your normal and fighting prompt, and change subProcessPrompt to the hp/max
+hp positions of your prompt. -->
+
+<!-- Saved on Sunday, April 03, 2005, 6:58 PM -->
+<!-- MuClient version 3.65 -->
+
+<muclient>
+<plugin
+   name="Reconnect"
+   author="Poromenos"
+   id="52866f0caba2601b6dece05a"
+   language="Python"
+   purpose="Reconnects on disconnection."
+   save_state="n"
+   date_written="2005-04-03 18:57:46"
+   requires="3.50"
+   version="1.0"
+   >
+
+</plugin>
+
+<timers>
+  <timer name="tmrReconnect" second="3" send_to="12">
+  <send>world.Note("Reconnecting...")
+world.EnableTimer("tmrReconnect", False)
+world.Connect()</send>
+
+  </timer>
+</timers>
+
+<script>
+<![CDATA[
+def OnPluginDisconnect():
+    world.Note("Connection dropped, will reconnect soon.")
+    world.EnableTimer("tmrReconnect", True)
+
+def OnPluginConnectFailed():
+    world.Note("Connecting failed, will reconnect soon.")
+    world.EnableTimer("tmrReconnect", True)
+]]>
+</script>
+
+
+</muclient>
