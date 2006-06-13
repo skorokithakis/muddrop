@@ -17,6 +17,23 @@ class Formatting:
     def __init__(self):
         self.strANSICodes = r"(?:\x1b\[(?:(?:\d+(?:|;))*[fHpm]|\=\d*[hl]|\d*[ABCDJKknsu])|\xff(\xfb|\xfc)\x01)"
 
+    def fnExpandRE(self, strText, reObject):
+        """Expand text according to the regular expression result."""
+        intCounter = 1
+        strReplaced = strText
+        lstMatches = reObject.groups()
+        for intCounter in range(len(lstMatches)):
+            if lstMatches[intCounter] == None:
+                strMatch = ""
+            else:
+                strMatch = lstMatches[intCounter]
+            strReplaced = strReplaced.replace("\\g<%s>" % (intCounter + 1), strMatch)
+        for strGroup, strMatch in reObject.groupdict().items():
+            if strMatch == None:
+                strMatch = ""
+            strReplaced = strReplaced.replace("\\g<%s>" % strGroup, strMatch)
+        return strReplaced
+
     def fnGetLineBeginning(self, strLine, intStart):
         """Find the actual beginning of a match object in the line that includes
            the ANSI codes."""
@@ -188,11 +205,13 @@ class MUDdrop:
 
                     if self.cnfConfiguration.blnDebug:
                         self.fnNoteData("Matched '%s' in %s, groups are %s" % (ciTrigger.strMatch, plgPlugin.strName, reResult.groups()))
+
+                    fmFormatting = Formatting()
                     # Check "send to".
                     if ciTrigger.intSendTo == 0:
-                        self.fnSendData(reResult.expand(ciTrigger.strSend))
+                        self.fnSendData(fmFormatting.fnExpandRE(ciTrigger.strSend, reResult))
                     elif ciTrigger.intSendTo == 12:
-                        self.fnExecCode(reResult.expand(ciTrigger.strSend), plgPlugin)
+                        self.fnExecCode(fmFormatting.fnExpandRE(ciTrigger.strSend, reResult), plgPlugin)
 
                     # Check scripting.
                     if ciTrigger.strScript != "":
