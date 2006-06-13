@@ -32,7 +32,7 @@ class Formatting:
             if strMatch == None:
                 strMatch = ""
             strReplaced = strReplaced.replace("\\g<%s>" % strGroup, strMatch)
-        return strReplaced
+        return reObject.expand(strReplaced)
 
     def fnGetLineBeginning(self, strLine, intStart):
         """Find the actual beginning of a match object in the line that includes
