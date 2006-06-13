@@ -1,12 +1,12 @@
 <mudbot
-host = "realms.game.org"
+host = "localhost"
 port = "4000"
 localport = "2000"
 name = "Sample"
 password = "c2FtcGxl"
 connectioncommands = "jdsof\naojs"
 debug = "y"
-notetoconsole = "n"
+notetoconsole = "y"
 notetoremote = "y"
 notetolog = "n"
 >
@@ -20,6 +20,7 @@ notetolog = "n"
      appendin = ""
      appendout = ""
      onconnect = "Connected to %server on %name on %a, %d %b %Y %H:%M:%S"
+     onconnectfailed = "Connection to %server on %name failed on %a, %d %b %Y %H:%M:%S"
      ondisconnect = "Disconnected on %a, %d %b %Y %H:%M:%S."
      onremoteconnect = "Remote client %rip connected on %a, %d %b %Y %H:%M:%S"
      onremotedisconnect = "Remote client %rip disconnected on %a, %d %b %Y %H:%M:%S."
@@ -109,7 +110,11 @@ trans</send>
 
   </timer>
 </timers>
-    <!--plugins>
-        <plugin name="Fight.xml" />
-    </plugins-->
+<script>
+<![CDATA[
+]]>
+</script>
+    <plugins>
+        <plugin name="Reconnect.xml" />
+    </plugins>
 </mudbot>
