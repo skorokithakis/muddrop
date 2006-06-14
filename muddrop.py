@@ -686,7 +686,9 @@ class Plugin:
         for strKey, strValue in self.dicVariables.items():
             etElement = ET.Element("variable")
             etElement.attrib = {"name": strKey}
-            etElement.text = strValue
+            if strValue == None:
+                strValue = ""
+            etElement.text = str(strValue)
             xmlVariables.append(etElement)
 
         ET.ElementTree(xmlRoot).write(flState)
