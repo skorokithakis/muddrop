@@ -142,6 +142,7 @@ class MUDdrop:
 
     def fnExit(self):
         """Handle exiting."""
+        self.fnSavePlugins()
         if mdBot.cntConnection != None:
             mdBot.cntConnection.close()
         reactor.stop()
@@ -874,8 +875,8 @@ class MUDProtocol(LineReceiver):
                 mdBot.fnProcessData(line.replace("\r", ""))
     def connectionLost(self, reason):
         mdBot.stConnectionState = AC_DISCONNECTED
-        mdBot.cntConnection.cleanup()
         mdBot.OnDisconnect()
+        mdBot.cntConnection.cleanup()
 
 class MUDConnection:
     def __init__(self, host, port):
@@ -886,20 +887,19 @@ class MUDConnection:
         deferred.addErrback(self.connectionFailed)
     def connectionFailed(self, reason):
         mdBot.stConnectionState = AC_DISCONNECTED
-        self.cleanup()
         mdBot.OnConnectFailed()
+        self.cleanup()
     def builtProtocol(self, protocol):
         self.protocol = protocol
         mdBot.stConnectionState = AC_CONNECTED
-        mdBot.cntClientConnection = MUDServer()
         mdBot.OnConnect()
-    def startedConnecting(self, connector):
-        mdBot.stConnectionState = AC_CONNECTING
+        mdBot.cntClientConnection = MUDServer()
     def sendLine(self, line):
         self.protocol.sendLine(line)
     def close(self):
         self.protocol.transport.loseConnection()
     def cleanup(self):
+        self.protocol = None
         mdBot.stConnectionState = AC_DISCONNECTED
         mdBot.cntConnection = None
         if mdBot.cntClientConnection:
@@ -949,6 +949,7 @@ class MUDServer(ServerFactory):
         if self.connected and self.client.intState == 2: # Authenticated.
             self.client.transport.write(line)
     def close(self):
+        self.port.stopListening()
         if self.connected:
             self.client.transport.loseConnection()
     def timeout(self):
