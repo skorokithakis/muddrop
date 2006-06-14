@@ -123,6 +123,11 @@ class MUDdrop:
         self.cntConnection = MUDConnection(self.cnfConfiguration.strHost, self.cnfConfiguration.intPort)
         mdBot.fnCallPluginFunction("OnPluginInstall", ())
 
+    def fnSavePlugins(self):
+        """Save all the plugins' states."""
+        for plgPlugin in self.cnfConfiguration.dicPlugins.values():
+            plgPlugin.savestate()
+
     def fnExecCode(self, strCode, plgPlugin):
         """Execute some code."""
         try:
@@ -320,6 +325,7 @@ class MUDdrop:
             self.fnNoteData(self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strOnDisconnect, self) + "\n")
         if self.cnfConfiguration.blnLogging:
             self.cnfConfiguration.flLogFile.close()
+        self.fnSavePlugins()
         self.fnCallPluginFunction("OnPluginDisconnect", ())
 
     def OnRemoteConnect(self, strAddress):
@@ -354,6 +360,9 @@ class Callbacks:
     def Send(self, strData):
         """Send data to the world."""
         mdBot.fnSendData(strData)
+    def Save(self):
+        """Save the plugin's state."""
+        self.plgPlugin.savestate()
     def Exit(self):
         """Exits the program."""
         mdBot.fnExit()
@@ -602,7 +611,7 @@ class Plugin:
         except:
                 mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
 
-    def load(self, strFilename):
+    def load(self, strFilename, strID):
         """Load the plugin data, triggers, etc."""
         try:
             flPlugin = file(strFilename)
@@ -627,6 +636,17 @@ class Plugin:
         except:
             mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
         self.dicVariables = {}
+        # Load variables from the file.
+        self.dicVariables.update(self.loadstate(xmlRoot))
+        # Load state variables (variables that already exist will be
+        # overwritten).
+        try:
+            flState = file("state/%s-%s-state.xml" % (strID, self.strID))
+        except:
+            pass
+        else:
+            self.dicVariables.update(self.loadstate(ET.parse(flState).getroot()))
+            flState.close()
 
         # Load triggers and timers.
         self.loadtriggers(xmlRoot.find("triggers"))
@@ -634,6 +654,43 @@ class Plugin:
         flPlugin.close()
 
         return self.strID
+
+    def loadstate(self, xmlRoot):
+        """Load the world variables from an xml node."""
+        dicVariables = {}
+        try:
+            lstVariables = xmlRoot.find("variables").getchildren()
+        except:
+            return {}
+
+        for etElement in lstVariables:
+            dicVariables[etElement.attrib["name"]] = etElement.text
+
+        return dicVariables
+
+    def savestate(self):
+        """Save the plugin state."""
+        if not self.blnSaveState:
+            return
+        try:
+            flState = file("state/%s-%s-state.xml" % (mdBot.cnfConfiguration.strID, self.strID), "w")
+        except:
+            return
+
+        xmlRoot = ET.Element("muclient")
+        xmlRoot.append(ET.Element("variables"))
+        xmlVariables = xmlRoot[0]
+        xmlVariables.attrib = {"muclient_version": "3", "world_file_version": "1", "date_saved": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}
+        
+        for strKey, strValue in self.dicVariables.items():
+            etElement = ET.Element("variable")
+            etElement.attrib = {"name": strKey}
+            etElement.text = strValue
+            xmlVariables.append(etElement)
+
+        ET.ElementTree(xmlRoot).write(flState)
+
+        flState.close()
 
     def fnselyn(self, strText):
         """Convert 'y'/'n' to True or False."""
@@ -644,7 +701,8 @@ class Plugin:
 
     def getxmlattr(self, xmlNode, strAttribute, blnYN = False):
         """Get the value of strAttribute from xmlNode, converting it to
-           binary if blnYN is True."""
+           binary if blnYN is True. If not found, return its default. If
+           the default does not exist, it is a mandatory attribute."""
 
         dicAttributes = {
             "appendin": "",               # Text to append to incoming data.
@@ -727,6 +785,9 @@ class Configuration:
         self.dicPlugins = {"000000000000000000000000": Plugin()}
         plgNamespace = self.dicPlugins["000000000000000000000000"]
 
+        # World ID.
+        self.strID = plgNamespace.getxmlattr(xmlRoot, "id")
+
         # Connection details.
         self.strHost = plgNamespace.getxmlattr(xmlRoot, "host")
         self.intPort = int(plgNamespace.getxmlattr(xmlRoot, "port"))
@@ -767,7 +828,18 @@ class Configuration:
             exec(strScript, plgNamespace.dicGlobals)
         except:
             mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
-        plgNamespace.dicVariables = {}
+
+        # Load variables from the file.
+        plgNamespace.dicVariables = plgNamespace.loadstate(xmlRoot)
+        # Load state variables (variables that already exist will be
+        # overwritten).
+        try:
+            flState = file("state/%s-%s-state.xml" % (self.strID, plgNamespace.strID))
+        except:
+            pass
+        else:
+            plgNamespace.dicVariables.update(plgNamespace.loadstate(ET.parse(flState).getroot()))
+            flState.close()
 
         # Load triggers, timers.
         plgNamespace.loadtriggers(xmlRoot.find("triggers"))
@@ -777,7 +849,7 @@ class Configuration:
         if xmlRoot.find("plugins"):
             for xmlPlugin in xmlRoot.find("plugins"):
                 plgPlugin = Plugin()
-                strID = plgPlugin.load(xmlPlugin.attrib["name"])
+                strID = plgPlugin.load(xmlPlugin.attrib["name"], self.strID)
                 if strID in self.dicPlugins:
                     mdBot.fnError("Duplicate plugin '%s' found." % xmlPlugin.attrib["name"])
                 else:
@@ -822,7 +894,6 @@ class MUDConnection:
         mdBot.cntClientConnection = MUDServer()
         mdBot.OnConnect()
     def startedConnecting(self, connector):
-        print "Started to connect."
         mdBot.stConnectionState = AC_CONNECTING
     def sendLine(self, line):
         self.protocol.sendLine(line)
