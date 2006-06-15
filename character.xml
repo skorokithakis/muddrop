@@ -2,6 +2,7 @@
 host = "localhost"
 port = "4000"
 localport = "2000"
+id="f49a19004624f79e0c9cfd17"
 name = "Sample"
 password = "c2FtcGxl"
 connectioncommands = "jdsof\naojs"
