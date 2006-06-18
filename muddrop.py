@@ -17,10 +17,19 @@ class Formatting:
     def __init__(self):
         self.strANSICodes = r"(?:\x1b\[(?:(?:\d+(?:|;))*[fHpm]|\=\d*[hl]|\d*[ABCDJKknsu])|\xff(\xfb|\xfc)\x01)"
 
-    def fnExpandRE(self, strText, reObject):
+    def fnExpandRE(self, strText, reObject, dicVariables = {}):
         """Expand text according to the regular expression result."""
         intCounter = 1
         strReplaced = strText
+
+        lstVariables = re.findall("@([a-z][a-z0-9\_]*)", strReplaced.lower(), re.IGNORECASE)
+        for strVariable in lstVariables:
+            try:
+                strValue = dicVariables[strVariable]
+            except KeyError:
+                strValue = ""
+            strReplaced = re.sub("(?i)@%s" % strVariable, strValue, strReplaced)
+
         lstMatches = reObject.groups()
         for intCounter in range(len(lstMatches)):
             if lstMatches[intCounter] == None:
@@ -32,6 +41,7 @@ class Formatting:
             if strMatch == None:
                 strMatch = ""
             strReplaced = strReplaced.replace("\\g<%s>" % strGroup, strMatch)
+
         return reObject.expand(strReplaced)
 
     def fnGetLineBeginning(self, strLine, intStart):
@@ -215,9 +225,10 @@ class MUDdrop:
                     fmFormatting = Formatting()
                     # Check "send to".
                     if ciTrigger.intSendTo == 0:
-                        self.fnSendData(fmFormatting.fnExpandRE(ciTrigger.strSend, reResult))
+                        # If blnExpandVariables is True, return the variables dictionary.
+                        self.fnSendData(fmFormatting.fnExpandRE(ciTrigger.strSend, reResult, (ciTrigger.blnExpandVariables and [plgPlugin.dicVariables] or [{}])[0]))
                     elif ciTrigger.intSendTo == 12:
-                        self.fnExecCode(fmFormatting.fnExpandRE(ciTrigger.strSend, reResult), plgPlugin)
+                        self.fnExecCode(fmFormatting.fnExpandRE(ciTrigger.strSend, reResult, (ciTrigger.blnExpandVariables and [plgPlugin.dicVariables] or [{}])[0]), plgPlugin)
 
                     # Check scripting.
                     if ciTrigger.strScript != "":
@@ -226,19 +237,54 @@ class MUDdrop:
                     if not ciTrigger.blnKeepEvaluating:
                         break
 
+    def fnMatchAliases(self, strData):
+        blnMatched = False
+        for plgPlugin in self.cnfConfiguration.dicPlugins.values():
+            for alsAlias in plgPlugin.lstAliases:
+                if not alsAlias.blnEnabled:
+                    continue
+
+                reResult = alsAlias.reAlias.search(strData)
+
+                if reResult != None:
+                    blnMatched = True
+                    if self.cnfConfiguration.blnDebug:
+                        self.fnNoteData("Matched '%s' in %s, groups are %s" % (alsAlias.strMatch, plgPlugin.strName, reResult.groups()))
+
+                    fmFormatting = Formatting()
+                    # Check "send to".
+                    if alsAlias.intSendTo == 0:
+                        # If blnExpandVariables is True, return the variables dictionary.
+                        strResult = fmFormatting.fnExpandRE(alsAlias.strSend, reResult, (alsAlias.blnExpandVariables and [plgPlugin.dicVariables] or [{}])[0])
+                        if alsAlias.blnEchoAlias:
+                            self.cntClientConnection.fnSend(strResult + "\n")
+                        self.fnSendData(strResult, alsAlias.blnOmitFromLog)
+                    elif alsAlias.intSendTo == 12:
+                        self.fnExecCode(fmFormatting.fnExpandRE(alsAlias.strSend, reResult, (alsAlias.blnExpandVariables and [plgPlugin.dicVariables] or [{}])[0]), plgPlugin)
+
+                    # Check scripting.
+                    if alsAlias.strScript != "":
+                        plgPlugin.run(alsAlias.strScript, (alsAlias.strName, strData, reResult.groups()))
+                    # Check "keep evaluating".
+                    if not alsAlias.blnKeepEvaluating:
+                        break
+        if not blnMatched:
+            self.fnSendData(strData)
+
     def fnProcessData(self, strData):
         """Process the data coming from the MUD and match triggers."""
         self.fnLogDataIn(strData)
         self.fnMatchTriggers(strData)
 
-    def fnSendData(self, strLine):
+    def fnSendData(self, strLine, blnOmitFromLog = False):
         """Send data to the MUD."""
         if strLine != "":
             try:
                 self.cntConnection.sendLine(strLine)
             except:
                 self.fnError("Could not write data to socket. Reason is '%s'." % sys.exc_value)
-            self.fnLogDataOut(strLine)
+            if not blnOmitFromLog:
+                self.fnLogDataOut(strLine)
 
     def fnLogDataIn(self, strData):
         """Log the incoming data."""
@@ -260,7 +306,7 @@ class MUDdrop:
                 print strData
         if self.cnfConfiguration.blnLogging and not blnOmitLog and self.cnfConfiguration.blnNoteToLog:
             self.cnfConfiguration.flLogFile.write("%s%s%s%s" % (self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strPrependOut, self), strData, self.fmFormatting.fnExpandMacros(self.cnfConfiguration.strAppendOut, self), (blnOmitNewline and [""] or ["\n"])[0]))
-        if self.cntClientConnection and blnOmitRemote and self.cnfConfiguration.blnNoteToRemote:
+        if self.cntClientConnection and not blnOmitRemote and self.cnfConfiguration.blnNoteToRemote:
             self.cntClientConnection.fnSend(strData + (blnOmitNewline and [""] or ["\n"])[0])
 
     def fnLogDataOut(self, strData):
@@ -354,14 +400,16 @@ class Callbacks:
     def __init__(self, plgNamespace):
         # Get the plugin reference so we can manipulate it.
         self.plgPlugin = plgNamespace
+        self.GetPluginName = plgNamespace.strName
     def Connect(self):
         """Connect to the server."""
         if mdBot.cntConnection == None:
             mdBot.cntConnection = MUDConnection(mdBot.cnfConfiguration.strHost, mdBot.cnfConfiguration.intPort)
     def Send(self, strData):
         """Send data to the world."""
+        mdBot.cntClientConnection.fnSend(strData)
         mdBot.fnSendData(strData)
-    def Save(self):
+    def SaveState(self):
         """Save the plugin's state."""
         self.plgPlugin.savestate()
     def Exit(self):
@@ -376,7 +424,7 @@ class Callbacks:
         mdBot.fnNoteData(strData)
     def SetVariable(self, strVariableName, strData):
         """Set a variable in the plugin's variables dictionary."""
-        self.plgPlugin.dicVariables[strVariableName] = strData
+        self.plgPlugin.dicVariables[strVariableName.lower()] = strData
         return 0
     def GetInfo(self, intInfoType):
         """Get information about the current character."""
@@ -400,15 +448,14 @@ class Callbacks:
             return "NOT IMPLEMENTED"
     def GetVariable(self, strVariableName):
         """Get a variable from the plugin's variables dictionary."""
-        if strVariableName in self.plgPlugin.dicVariables:
-            varReturn = self.plgPlugin.dicVariables[strVariableName]
+        if strVariableName.lower() in self.plgPlugin.dicVariables:
+            return self.plgPlugin.dicVariables[strVariableName.lower()]
         else:
-            varReturn = None
-        return varReturn
+            return
     def DeleteVariable(self, strVariableName):
         """Delete a variable from the plugin's variables dictionary."""
-        if strVariableName in self.plgPlugin.dicVariables:
-            del self.plgPlugin.dicVariables[strVariableName]
+        if strVariableName.lower() in self.plgPlugin.dicVariables:
+            del self.plgPlugin.dicVariables[strVariableName.lower()]
             varReturn = 0
         else:
             varReturn = 30019
@@ -501,6 +548,17 @@ class Plugin:
                 return 0
             else:
                 return 1
+    class Alias:
+        """The alias object class."""
+        def __repr__(self):
+            return self.strMatch
+        def __cmp__(self, other):
+            if self.intSequence < other.intSequence:
+                return -1
+            elif self.intSequence == other.intSequence:
+                return 0
+            else:
+                return 1
     class Timer:
         """The timer object class."""
 
@@ -564,6 +622,7 @@ class Plugin:
             trgTrigger = Plugin.Trigger()
             trgTrigger.strMatch = self.getxmlattr(xmlTrigger, "match")
             trgTrigger.blnEnabled = self.getxmlattr(xmlTrigger, "enabled", True)
+            trgTrigger.blnExpandVariables = self.getxmlattr(xmlTrigger, "expand_variables", True)
             trgTrigger.blnKeepANSI = self.getxmlattr(xmlTrigger, "keep_ansi", True)
             trgTrigger.blnBold = self.getxmlattr(xmlTrigger, "bold", True)
             trgTrigger.blnInverse = self.getxmlattr(xmlTrigger, "inverse", True)
@@ -602,6 +661,49 @@ class Plugin:
             self.lstTriggers.append(trgTrigger)
         self.lstTriggers.sort()
 
+    def loadaliases(self, xmlAliases):
+        """Load aliases from the xmlAliases node."""
+        fmFormatting = Formatting()
+
+        self.lstAliases = []
+        if xmlAliases == None:
+            return
+        for xmlAlias in xmlAliases:
+            alsAlias = Plugin.Alias()
+            alsAlias.strMatch = self.getxmlattr(xmlAlias, "match")
+            alsAlias.blnEnabled = self.getxmlattr(xmlAlias, "enabled", True)
+            alsAlias.blnExpandVariables = self.getxmlattr(xmlAlias, "expand_variables", True)
+            alsAlias.blnEchoAlias = self.getxmlattr(xmlAlias, "echo_alias", True)
+            alsAlias.strName = self.getxmlattr(xmlAlias, "name")
+            for alsOther in self.lstAliases:
+                if (alsOther.strName.lower() == alsAlias.strName.lower()) and (alsOther.strName != ""):
+                    mdBot.fnError("Duplicate alias name found: '%s'" % alsOther.strName)
+            alsAlias.strGroup = self.getxmlattr(xmlAlias, "group")
+            alsAlias.blnIgnoreCase = self.getxmlattr(xmlAlias, "ignore_case", True)
+            alsAlias.blnRegexp = self.getxmlattr(xmlAlias, "regexp", True)
+            alsAlias.blnKeepEvaluating = self.getxmlattr(xmlAlias, "keep_evaluating", True)
+            alsAlias.blnOmitFromCommandHistory = self.getxmlattr(xmlAlias, "omit_from_command_history", True)
+            alsAlias.blnOmitFromLog = self.getxmlattr(xmlAlias, "omit_from_log", True)
+            alsAlias.intSequence = int(self.getxmlattr(xmlAlias, "sequence"))
+            alsAlias.intSendTo = int(self.getxmlattr(xmlAlias, "send_to"))
+            alsAlias.strScript = self.getxmlattr(xmlAlias, "script")
+            alsAlias.strVariable = self.getxmlattr(xmlAlias, "variable")
+
+            if not alsAlias.blnRegexp:
+                alsAlias.strMatch = fmFormatting.fnRegexpify(alsAlias.strMatch)
+
+            if len(xmlAlias) > 0:
+                # Substitute MUSHClient compatible %1 for pyregexp \1.
+                alsAlias.strSend = re.sub(r"\%(?:(\d)|\<(.*?)\>)", r"\\g<\1>", xmlAlias[0].text)
+            else:
+                alsAlias.strSend = ""
+            intFlags = 0
+            if alsAlias.blnIgnoreCase:
+                intFlags |= re.IGNORECASE
+            alsAlias.reAlias = re.compile(alsAlias.strMatch, intFlags)
+            self.lstAliases.append(alsAlias)
+        self.lstAliases.sort()
+
     def run(self, strFunctionName, tplArguments, blnSilent = False):
         """Execute the function in the plugin namespace."""
         try:
@@ -636,9 +738,8 @@ class Plugin:
             exec(strScript, self.dicGlobals)
         except:
             mdBot.fnException(sys.exc_type, sys.exc_value, sys.exc_traceback)
-        self.dicVariables = {}
         # Load variables from the file.
-        self.dicVariables.update(self.loadstate(xmlRoot))
+        self.dicVariables = self.loadstate(xmlRoot)
         # Load state variables (variables that already exist will be
         # overwritten).
         try:
@@ -649,9 +750,11 @@ class Plugin:
             self.dicVariables.update(self.loadstate(ET.parse(flState).getroot()))
             flState.close()
 
-        # Load triggers and timers.
+        # Load aliases, triggers and timers.
+        self.loadaliases(xmlRoot.find("aliases"))
         self.loadtriggers(xmlRoot.find("triggers"))
         self.loadtimers(xmlRoot.find("timers"))
+
         flPlugin.close()
 
         return self.strID
@@ -665,7 +768,10 @@ class Plugin:
             return {}
 
         for etElement in lstVariables:
-            dicVariables[etElement.attrib["name"]] = etElement.text
+            if etElement.text == None:
+                dicVariables[etElement.attrib["name"].lower()] = ""
+            else:
+                dicVariables[etElement.attrib["name"].lower()] = etElement.text
 
         return dicVariables
 
@@ -682,12 +788,10 @@ class Plugin:
         xmlRoot.append(ET.Element("variables"))
         xmlVariables = xmlRoot[0]
         xmlVariables.attrib = {"muclient_version": "3", "world_file_version": "1", "date_saved": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}
-        
+
         for strKey, strValue in self.dicVariables.items():
             etElement = ET.Element("variable")
             etElement.attrib = {"name": strKey}
-            if strValue == None:
-                strValue = ""
             etElement.text = str(strValue)
             xmlVariables.append(etElement)
 
@@ -708,59 +812,61 @@ class Plugin:
            the default does not exist, it is a mandatory attribute."""
 
         dicAttributes = {
-            "appendin": "",               # Text to append to incoming data.
-            "appendout": "",              # Text to append to outgoing data.
-            "active_closed": False,       # Is timer active when the world is closed? (NS)
-            "at_time": False,             # At time for timer. (NS)
-            "back_colour": 0,             # Backcolour to match on. (NS)
-            "bold": False,                # Match if the text is bold. (NS)
-            "connectioncommands": "",     # Commands to send on connection.
-            "debug": False,               # Print debugging data in the output.
-            "enabled": False,             # Is the item enabled?
-            "expand_variables": False,    # Expand variables. (NS)
-            "group": "",                  # Item group name.
-            "hour": 0,                    # Hour interval for timers. (NS)
-            "ignore_case": False,         # Ignore case. (NS)
-            "inverse": False,             # Match if the text is inverse. (NS)
-            "italic": False,              # Match if the text is italic. (NS)
-            "keep_ansi": False,           # Keep the ANSI codes to match on.
-            "keep_evaluating": True,      # Keep evaluating after a trigger has been matched.
-            "localport": 4000,            # Port number to listen to.
-            "logfile": "log.txt",         # Log filename.
-            "logging": False,             # Is logging enabled?
-            "match_back_colour": False,   # Enable match on backcolour.
-            "match_bold": False,          # Enable match on bold.
-            "match_inverse": False,       # Enable match on inverse.
-            "match_italic": False,        # Enable match on italic.
-            "match_text_colour": False,   # Enable match on forecolour.
-            "minute": 0,                  # Minute interval for timers. (NS)
-            "name": "",                   # Item name.
-            "notetoconsole": False,       # Send notes to the console.
-            "notetolog": False,           # Write notes to the log.
-            "notetoremote": True,         # Send notes to the remote client.
-            "offset_hour": 0,             # Hour offset for timers. (NS)
-            "offset_minute": 0,           # Minute offset for timers. (NS)
-            "offset_second": 0,           # Second offset for timers. (NS)
-            "omit_from_log": False,       # Omit line from logfile. (NS)
-            "omit_from_output": False,    # Omit line from output. (NS)
-            "one_shot": False,            # Is timer one-shot? (NS)
-            "onconnect": "",              # Log text to append on connection.
-            "ondisconnect": "",           # Log text to append on disconnection.
-            "onremoteconnect": "",        # Log text to append on remote client connection.
-            "onremotedisconnect": "",     # Log text to append on remote client disconnection.
-            "port": 4000,                 # Port to connect on.
-            "prependin": "",              # Text to prepend to incoming data.
-            "prependout": "",             # Text to prepend to outgoing data.
-            "regexp": False,              # Is the trigger a regular expression?
-            "repeat": False,              # Repeat the trigger on the same line. (NS)
-            "save_state": False,          # Save the namespace's state. (NS)
-            "script": "",                 # Call a script function when executed.
-            "second": 0,                  # Second interval for timers. (NS)
-            "send_to": 0,                 # Send to various outputs. (PS)
-            "sequence": 100,              # Sequence of the trigger.
-            "toscreen": False,            # Print the output to stdout.
-            "text_colour": 0,             # Forecolour to match on. (NS)
-            "variable": "",               # Variable to send to (NS)
+            "appendin": "",                          # Text to append to incoming data.
+            "appendout": "",                         # Text to append to outgoing data.
+            "active_closed": False,                  # Is timer active when the world is closed? (NS)
+            "at_time": False,                        # At time for timer. (NS)
+            "back_colour": 0,                        # Backcolour to match on. (NS)
+            "bold": False,                           # Match if the text is bold. (NS)
+            "connectioncommands": "",                # Commands to send on connection.
+            "debug": False,                          # Print debugging data in the output.
+            "enabled": False,                        # Is the item enabled?
+            "expand_variables": False,               # Expand variables. (NS)
+            "echo_alias": False,                     # Echo the alias. (NS)
+            "group": "",                             # Item group name.
+            "hour": 0,                               # Hour interval for timers. (NS)
+            "ignore_case": False,                    # Ignore case. (NS)
+            "inverse": False,                        # Match if the text is inverse. (NS)
+            "italic": False,                         # Match if the text is italic. (NS)
+            "keep_ansi": False,                      # Keep the ANSI codes to match on.
+            "keep_evaluating": True,                 # Keep evaluating after a trigger has been matched.
+            "localport": 4000,                       # Port number to listen to.
+            "logfile": "log.txt",                    # Log filename.
+            "logging": False,                        # Is logging enabled?
+            "match_back_colour": False,              # Enable match on backcolour.
+            "match_bold": False,                     # Enable match on bold.
+            "match_inverse": False,                  # Enable match on inverse.
+            "match_italic": False,                   # Enable match on italic.
+            "match_text_colour": False,              # Enable match on forecolour.
+            "minute": 0,                             # Minute interval for timers. (NS)
+            "name": "",                              # Item name.
+            "notetoconsole": False,                  # Send notes to the console.
+            "notetolog": False,                      # Write notes to the log.
+            "notetoremote": True,                    # Send notes to the remote client.
+            "offset_hour": 0,                        # Hour offset for timers. (NS)
+            "offset_minute": 0,                      # Minute offset for timers. (NS)
+            "offset_second": 0,                      # Second offset for timers. (NS)
+            "omit_from_command_history": False,      # Omit line from logfile. (NS)
+            "omit_from_log": False,                  # Omit line from logfile. (NS)
+            "omit_from_output": False,               # Omit line from output. (NS)
+            "one_shot": False,                       # Is timer one-shot? (NS)
+            "onconnect": "",                         # Log text to append on connection.
+            "ondisconnect": "",                      # Log text to append on disconnection.
+            "onremoteconnect": "",                   # Log text to append on remote client connection.
+            "onremotedisconnect": "",                # Log text to append on remote client disconnection.
+            "port": 4000,                            # Port to connect on.
+            "prependin": "",                         # Text to prepend to incoming data.
+            "prependout": "",                        # Text to prepend to outgoing data.
+            "regexp": False,                         # Is the trigger a regular expression?
+            "repeat": False,                         # Repeat the trigger on the same line. (NS)
+            "save_state": False,                     # Save the namespace's state. (NS)
+            "script": "",                            # Call a script function when executed.
+            "second": 0,                             # Second interval for timers. (NS)
+            "send_to": 0,                            # Send to various outputs. (PS)
+            "sequence": 100,                         # Sequence of the trigger.
+            "toscreen": False,                       # Print the output to stdout.
+            "text_colour": 0,                        # Forecolour to match on. (NS)
+            "variable": "",                          # Variable to send to (NS)
         }
         if strAttribute in xmlNode.attrib:
             if blnYN:
@@ -846,6 +952,7 @@ class Configuration:
 
         # Load triggers, timers.
         plgNamespace.loadtriggers(xmlRoot.find("triggers"))
+        plgNamespace.loadaliases(xmlRoot.find("aliases"))
         plgNamespace.loadtimers(xmlRoot.find("timers"))
 
         # Load plugins.
@@ -923,8 +1030,7 @@ class MUDServerProtocol(LineReceiver):
                 self.sendLine("Wrong name/password.\n")
                 self.transport.loseConnection()
         elif self.intState == 2:
-            mdBot.cntConnection.sendLine(line)
-            mdBot.fnLogDataOut(line)
+            mdBot.fnMatchAliases(line)
     def connectionLost(self, reason):
         if self.intState == 2:
             mdBot.OnRemoteDisconnect(self.transport.getPeer().host)
