@@ -5,6 +5,7 @@ import optparse
 import sys, os
 import base64
 import time
+import md5
 from twisted.internet.protocol import Protocol, ClientCreator, ServerFactory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
@@ -1069,13 +1070,18 @@ mdBot = MUDdrop()
 
 def fnMain():
     global mdBot
+
     cmdParser = optparse.OptionParser(usage = "%prog [options]")
     cmdParser.set_defaults(character = "character.xml", password = "")
     cmdParser.add_option("-c", "--character", dest = "character", help = "load the character configuration from FILE (default: %default)", metavar = "FILE")
     cmdParser.add_option("-e", "--encode", dest = "password", help = "encode STRING in base64 and print it", metavar = "STRING")
+    cmdParser.add_option("-i", "--generateid", dest = "generateid", help = "generate a unique ID", action = "store_true")
     (optOptions, lstArguments) = cmdParser.parse_args()
     if optOptions.password:
         print "The encoded string is \"%s\"" % base64.b64encode(optOptions.password)
+        return
+    if optOptions.generateid:
+        print "Your unique ID is:\n%s" % md5.new(str(time.time())).hexdigest()[0:24]
         return
     mdBot.init(optOptions.character)
 
