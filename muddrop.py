@@ -1,6 +1,7 @@
 import elementtree.ElementTree as ET
 import exceptions
 import re
+import optparse
 import sys, os
 import base64
 import time
@@ -1064,18 +1065,20 @@ class MUDServer(ServerFactory):
         if self.client.intState != 2:
             self.close()
 
-try:
-    flFile = file("muddrop.xml")
-except:
-    print("Cannot open configuration file 'muddrop.xml' for reading.")
-    sys.exit()
-xmlTree = ET.parse(flFile)
-flFile.close()
-xmlRoot = xmlTree.getroot()
-
 mdBot = MUDdrop()
-mdBot.init(xmlRoot[0].attrib["file"])
-del xmlTree, flFile
-del xmlRoot
 
-reactor.run()
+def fnMain():
+    global mdBot
+    cmdParser = optparse.OptionParser(usage = "%prog [options]")
+    cmdParser.set_defaults(character = "character.xml", password = "")
+    cmdParser.add_option("-c", "--character", dest = "character", help = "load the character configuration from FILE (default: %default)", metavar = "FILE")
+    cmdParser.add_option("-e", "--encode", dest = "password", help = "encode STRING in base64 and print it", metavar = "STRING")
+    (optOptions, lstArguments) = cmdParser.parse_args()
+    if optOptions.password:
+        print "The encoded string is \"%s\"" % base64.b64encode(optOptions.password)
+        return
+    mdBot.init(optOptions.character)
+
+    reactor.run()
+
+fnMain()
