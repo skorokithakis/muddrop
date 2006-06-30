@@ -30,7 +30,7 @@ class Formatting:
                 strValue = dicVariables[strVariable]
             except KeyError:
                 strValue = ""
-            strReplaced = re.sub("(?i)@%s" % strVariable, strValue, strReplaced)
+            strReplaced = re.sub("(?i)@%s" % strVariable, str(strValue), strReplaced)
 
         lstMatches = reObject.groups()
         for intCounter in range(len(lstMatches)):
