@@ -22,24 +22,45 @@ hp positions of your prompt. -->
 
 </plugin>
 
+<aliases>
+  <alias
+   script="PlayerQuit"
+   match="quit"
+   enabled="y"
+   ignore_case="y"
+   sequence="100"
+  >
+  </alias>
+</aliases>
+
 <timers>
-  <timer name="tmrReconnect" second="3" send_to="12">
+  <timer name="tmrReconnect" second="1" send_to="12" active_closed="y">
   <send>world.Note("Reconnecting...")
 world.EnableTimer("tmrReconnect", False)
-world.Connect()</send>
+world.Connect()
+</send>
 
   </timer>
 </timers>
 
 <script>
 <![CDATA[
+blnPlayerQuit = False
+
 def OnPluginDisconnect():
-    world.Note("Connection dropped, will reconnect soon.")
-    world.EnableTimer("tmrReconnect", True)
+    if not blnPlayerQuit:
+        world.Note("Connection dropped, will reconnect soon.")
+        world.EnableTimer("tmrReconnect", True)
 
 def OnPluginConnectFailed():
-    world.Note("Connecting failed, will reconnect soon.")
-    world.EnableTimer("tmrReconnect", True)
+    if not blnPlayerQuit:
+        world.Note("Connecting failed, will reconnect soon.")
+        world.EnableTimer("tmrReconnect", True)
+
+def PlayerQuit(strName, strLine, lstWildcards):
+    global blnPlayerQuit
+    blnPlayerQuit = True
+    world.Send("quit")
 ]]>
 </script>
 
