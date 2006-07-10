@@ -161,11 +161,17 @@ class MUDdrop:
         self = None
 
     def fnHandleTimers(self):
-        # The timer that just fired is useless, so create a new one.
+        blnActiveTimers = False
         for plgPlugin in self.cnfConfiguration.dicPlugins.values():
             for tmrTimer in plgPlugin.lstTimers:
                 if not tmrTimer.blnEnabled:
                     continue
+                try:
+                    if not mdBot.cntConnection and not tmrTimer.blnActiveClosed:
+                        continue
+                except:
+                    pass
+                blnActiveTimers = True
                 fltNewTime = time.time()
                 if fltNewTime > tmrTimer.fltTime + tmrTimer.intHour * 3600 + tmrTimer.intMinute * 60 + tmrTimer.intSecond:
                     if tmrTimer.intSendTo == 0:
@@ -181,7 +187,10 @@ class MUDdrop:
                     if tmrTimer.strScript != "":
                         # We need a tuple, hence the comma
                         plgPlugin.run(tmrTimer.strScript, (tmrTimer.strName, ))
-        reactor.callLater(1, self.fnHandleTimers)
+        if blnActiveTimers or mdBot.cntConnection:
+            reactor.callLater(1, self.fnHandleTimers)
+        else:
+            reactor.stop()
 
     def fnMatchTriggers(self, strData):
         lstLastStyle = self.fmFormatting.fnGetStyle(strData, len(strData))
